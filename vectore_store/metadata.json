@@ -1,1 +1,18 @@
-{}
+{
+    "3c9cdddd-2e92-4296-844a-d99c32ab9da0": {
+        "filename": "sample.txt",
+        "num_chunks": 4,
+        "path": "uploads_files\\sample.txt",
+        "start_idx": 12,
+        "end_idx": 16,
+        "timestamp": "2025-11-12T17:04:59.025218"
+    },
+    "b968e84e-6acd-41aa-af42-a3ef88a77501": {
+        "filename": "sample.txt",
+        "num_chunks": 4,
+        "path": "uploads_files\\sample.txt",
+        "start_idx": 16,
+        "end_idx": 20,
+        "timestamp": "2025-11-12T17:07:35.144817"
+    }
+}

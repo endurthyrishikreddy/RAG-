@@ -1,5 +1,44 @@
-venv/
-__pycache__
-.env/
-*.pyc       
+--- General Python Artifacts ---
+
+pycache/
+*.pyc
 *.pyo
+*.pyd
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+.env # <-- Now explicitly protected
+
+--- Operating System Files ---
+
+*~
+.DS_Store
+.vscode/
+
+--- Uvicorn/FastAPI specific ---
+
+.pytest_cache/
+
+--- RAG/Application Data Files (CRITICAL) ---
+
+Directories created by the backend (FastAPI/Uvicorn) that should NOT be version controlled
+
+Uploaded documents
+
+uploads_files/
+
+Vector Store persistence directory (Faiss index and pickle data)
+
+vector_store/
+
+Local metadata persistence (if used)
+
+metadata_store/
+
+Python environment-specific files (e.g. for Streamlit)
+
+streamlit_static/

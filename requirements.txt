@@ -13,4 +13,6 @@ chromadb
 numpy
 google-generativeai
 python-dotenv
+streamlit
+requests
 
