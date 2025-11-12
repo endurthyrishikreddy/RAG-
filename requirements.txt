@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+python-multipart
+pymupdf
+python-docx
+openai
+sentence-transformers
+faiss-cpu
+chromadb
+langchain
+faiss-cpu
+chromadb
+numpy
+google-generativeai
+python-dotenv
+
