@@ -12,6 +12,13 @@ from google import genai
 from dotenv import load_dotenv
 import asyncio
 from metadata.metadata_Store import MetadataStore
+from retrievers.hybrid_retriever import HybridRetriever
+from retrievers.bm25_retrievers import BM25Retriever
+
+
+
+
+
 app=FastAPI(title="RAG API")
 
 app.add_middleware(
@@ -44,12 +51,14 @@ VECTOR_STORE_PATH = "vector_store/faiss_index"
 store_lock = asyncio.Lock()  # To ensure thread-safe access to the vector store
 
 metadata_store = MetadataStore()
+bm25_retriever = BM25Retriever(text_chunks=[])
+hybrid_retriever = None
 
 
 @app.on_event("startup")
 def load_faiss_index():
     """Load FAISS index once at startup if exists."""
-    global vector_store
+    global vector_store, bm25_retriever, hybrid_retriever
     vector_store = FaissStore(dimension=384)
 
     if os.path.exists(VECTOR_STORE_PATH + ".index"):
@@ -60,6 +69,8 @@ def load_faiss_index():
             print(f"⚠️ Failed to load FAISS index: {e}")
     else:
         print("ℹ️ No existing FAISS index found. Will create a new one.")
+
+    hybrid_retriever = HybridRetriever(vector_store, bm25_retriever, alpha=0.5)   
 
 @app.get("/")
 async def root():
@@ -94,6 +105,7 @@ async def upload_file(file:UploadFile=File(...), background_tasks: BackgroundTas
     async with store_lock:
         start_idx = len(vector_store.texts)
         vector_store.add(chunks,sentence_embeddings, metadata)
+        bm25_retriever.add_documents(chunks)
         end_idx = len(vector_store.texts)
         background_tasks.add_task(vector_store.save, VECTOR_STORE_PATH)
 
@@ -253,5 +265,65 @@ async def generate_response(query:str):
         "query": query,
         "answer": answer,
         "retrieved_context": results
+    }
+
+
+@app.get("/query/")
+async def query_rag(query: str, mode: str = "hybrid"):
+    global vector_store, bm25_retriever
+    if vector_store is None or not vector_store.texts:
+        return {"error": "No vector store or documents available. Please upload a file first."}
+
+    query_emb = await asyncio.to_thread(sentence_embedder.embed, [query])
+    query_emb = query_emb[0]
+
+    async with store_lock:
+        if mode == "vector":
+            # Semantic search
+            top_chunks, _ = await asyncio.to_thread(vector_store.search, query_emb, top_k=3)
+        
+        elif mode == "bm25":
+            # Lexical search
+            top_chunks, _ = await asyncio.to_thread(bm25_retriever.retrieve, query, top_k=3)
+        
+        elif mode == "hybrid":
+            # Hybrid search
+            top_chunks = await asyncio.to_thread(hybrid_retriever.retrieve, query_emb, query, top_k=3)
+        
+        else:
+            return {"error": "Invalid mode. Choose vector, bm25, or hybrid."}
+
+    context = "\n\n".join(top_chunks)
+    prompt = f"""
+    You are an intelligent assistant. Use the following context to answer the question.
+    If the context does not contain the answer, say "I'm not sure based on the provided data."
+
+    Context:
+    {context}
+
+    Question:
+    {query}
+
+    Answer:
+    """
+    
+    # --- CORRECTED GEMINI API CALL ---
+    completion = await asyncio.to_thread(gemini_client.models.generate_content,
+        model="gemini-2.5-flash",
+        # 1. Use 'contents' instead of 'messages'
+        contents=prompt, 
+        # 2. Pass temperature and other parameters via 'config'
+        config={"temperature": 0.3}
+    )
+
+
+    # 3. Access the response text via the '.text' property
+    answer = completion.text.strip()
+
+    return {
+        "mode": mode,
+        "query": query,
+        "answer": answer,
+        "retrieved_context": top_chunks
     }
 

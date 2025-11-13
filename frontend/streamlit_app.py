@@ -11,7 +11,7 @@ st.set_page_config(page_title="RAG Document Uploader", page_icon="📄", layout=
 st.title("📄 RAG Document Uploader")
 st.caption("Upload your documents to build a knowledge base for retrieval-augmented generation (RAG).")
 
-tabs = st.tabs(["Upload Document", "View Documents", "Search", "Question & Answer"])
+tabs = st.tabs(["Upload Document", "View Documents", "Search", "Question & Answer", "Hybrid Q&A"])
 
 with tabs[0]:
     st.header("📤 Upload a Document")
@@ -120,19 +120,22 @@ with tabs[2]:
             st.warning("Please enter a search query.") 
 
             
+# --- TAB 3: Gemini Direct QA ---
 with tabs[3]:
-    st.header("❓ Question & Answer")
-    question = st.text_input("Ask a question based on your documents:", key='qa_question')
+    st.header("❓ Question & Answer (Gemini Direct)")
     
-    if st.button("Get Answer"):
-        # FIX 3: Check and use the correct variable: 'question'
-        if not question.strip(): 
+    question_gemini = st.text_input(
+        "Ask a question based on your documents:", 
+        key='qa_question_gemini'
+    )
+
+    if st.button("Get Answer (Gemini)", key="button_gemini_qna"):
+        if not question_gemini.strip():
             st.warning("Please enter a question.")
         else:
             with st.spinner("Generating answer..."):
-                # FIX 3: Use the correct FastAPI endpoint: /generate_gemini/
-                response = requests.get(f"{API_URL}/generate_gemini/", params={"query": question})
-                
+                response = requests.get(f"{API_URL}/generate_gemini/", params={"query": question_gemini})
+            
             if response.status_code == 200:
                 data = response.json()
                 st.markdown("### 🤖 **Answer:**")
@@ -144,3 +147,40 @@ with tabs[3]:
                         st.markdown(f"**Chunk {i+1}:** {chunk}")
             else:
                 st.error(f"❌ Error: {response.text}")
+
+# --- TAB 4: Hybrid / Vector / BM25 QA ---
+with tabs[4]:
+    st.header("❓ Question & Answer (RAG Modes)")
+    
+    question_rag = st.text_input(
+        "Ask a question based on your documents:", 
+        key='qa_question_rag'
+    )
+
+    mode = st.selectbox(
+        "Select retrieval mode:", 
+        ["hybrid", "vector", "bm25"], 
+        key="retrieval_mode_select"
+    )
+
+    if st.button("Get Answer (RAG)", key="button_rag_qna"):
+        if not question_rag.strip():
+            st.warning("Please enter a question.")
+        else:
+            with st.spinner("Generating answer..."):
+                params = {"query": question_rag, "mode": mode}
+                response = requests.get(f"{API_URL}/query/", params=params)
+
+            if response.status_code == 200:
+                data = response.json()
+                st.markdown("### 🤖 **Answer:**")
+                st.success(data.get("answer", "No answer found."))
+
+                with st.expander("🔍 Retrieved Context"):
+                    for i, chunk in enumerate(data.get("retrieved_context", [])):
+                        st.markdown(f"**Chunk {i+1}:** {chunk}")
+                
+                st.markdown(f"**Mode Used:** `{data.get('mode', 'unknown')}`")
+
+            else:
+                st.error(f"❌ Error {response.status_code}: {response.text}")

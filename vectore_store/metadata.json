@@ -14,5 +14,13 @@
         "start_idx": 16,
         "end_idx": 20,
         "timestamp": "2025-11-12T17:07:35.144817"
+    },
+    "d377acb7-aa5a-4b9b-ad34-eaa9265a95cb": {
+        "filename": "sample.txt",
+        "num_chunks": 4,
+        "path": "uploads_files\\sample.txt",
+        "start_idx": 20,
+        "end_idx": 24,
+        "timestamp": "2025-11-13T11:02:07.623470"
     }
 }
