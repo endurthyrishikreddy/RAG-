@@ -14,6 +14,10 @@ import asyncio
 from metadata.metadata_Store import MetadataStore
 from retrievers.hybrid_retriever import HybridRetriever
 from retrievers.bm25_retrievers import BM25Retriever
+from rerank.reranker import Reranker
+from filters.metadata_filter import MetadataFilter
+from memory.memory_manager import MemoryManager
+from typing import List, Dict, Any
 
 
 
@@ -53,6 +57,10 @@ store_lock = asyncio.Lock()  # To ensure thread-safe access to the vector store
 metadata_store = MetadataStore()
 bm25_retriever = BM25Retriever(text_chunks=[])
 hybrid_retriever = None
+reranker=Reranker()
+memory_manager = MemoryManager(short_term_limit=5)
+# metadata_stores = []
+
 
 
 @app.on_event("startup")
@@ -80,6 +88,7 @@ async def root():
 async def upload_file(file:UploadFile=File(...), background_tasks: BackgroundTasks =None):
     "upload a file and return the chunks"
     global vector_store
+    # global metadata_stores
     #save the file
     file_location=os.path.join("uploads_files",file.filename)
     os.makedirs(loader.upload_dir, exist_ok=True)
@@ -326,4 +335,231 @@ async def query_rag(query: str, mode: str = "hybrid"):
         "answer": answer,
         "retrieved_context": top_chunks
     }
+
+
+@app.get("/query with reranker & metadata/")
+async def query_rag(
+    query: str, 
+    mode: str = "hybrid", 
+    filter_source: str = None, 
+    rerank: bool = True
+):
+    global vector_store, bm25_retriever, metadata_store
+
+    query_emb = sentence_embedder.embed([query])[0]
+
+    # ----- Retrieval -----
+    if mode == "vector":
+        candidates = vector_store.search(query_emb, top_k=10)
+
+    elif mode == "bm25":
+        candidates, _ = bm25_retriever.retrieve(query, top_k=10)
+
+    elif mode == "hybrid":
+        hybrid = HybridRetriever(vector_store, bm25_retriever, alpha=0.6)
+        candidates = hybrid.retrieve(query_emb, query, top_k=10)
+
+    # ----- Metadata Filter -----
+    if filter_source:
+        mf = MetadataFilter(metadata_store)
+        candidates = mf.filter(
+            candidates,
+            {"source": filter_source}
+        )
+
+    # If no results after filtering
+    if not candidates:
+        return {"answer": "No documents match the metadata filter."}
+
+    # ----- Reranking -----
+    if rerank:
+        reranked = reranker.rerank(query, candidates, top_k=5)
+        ranked_docs = [doc for doc, _ in reranked]
+    else:
+        ranked_docs = candidates[:5]
+
+    # ----- Build LLM prompt -----
+    context = "\n\n".join(ranked_docs)
+    prompt = f"""
+    You are an intelligent assistant. Use the following context to answer the question.
+    If the context does not contain the answer, say "I'm not sure based on the provided data."
+
+    Context:
+    {context}
+
+    Question:
+    {query}
+
+    Answer:
+    """
+    
+    # --- CORRECTED GEMINI API CALL ---
+    completion = await asyncio.to_thread(gemini_client.models.generate_content,
+        model="gemini-2.5-flash",
+        # 1. Use 'contents' instead of 'messages'
+        contents=prompt, 
+        # 2. Pass temperature and other parameters via 'config'
+        config={"temperature": 0.3}
+    )
+
+
+    # 3. Access the response text via the '.text' property
+    answer = completion.text.strip()
+    return {
+        "query": query,
+        "answer": answer,
+        "retrieved": ranked_docs,
+        "metadata_filter": filter_source,
+        "reranking": rerank,
+        "mode": mode
+    }
+
+
+
+
+@app.post("/chat/")
+async def chat_endpoint(query:str , session_id:str, mode:str="hybrid", rerank:bool=True, filter_source:str=None):
+    """
+    Chat endpoint with:
+    - Short-term memory (per session)
+    - Long-term memory (FAISS RAG)
+    - Hybrid retrieval + reranking
+    - Gemini LLM generation
+    """
+    global memory_manager, vector_store, bm25_retriever, metadata_store
+
+    "Create a session id if not provided"
+    if session_id is None or session_id.lower() == "new":
+        session_id = memory_manager.new_session()
+
+    memory_manager.add_message(session_id, "user", query)
+
+    # --- Retrieval  long term memory---
+    query_emb = await asyncio.to_thread(sentence_embedder.embed, [query])
+    query_emb = query_emb[0]
+    docs : List[str]    = []
+
+    async with store_lock:
+        if mode == "vector":
+            docs,metadata = await asyncio.to_thread(vector_store.search, query_emb, top_k=10)
+
+        elif mode == "bm25":
+            docs, _ = await asyncio.to_thread(bm25_retriever.retrieve, query, top_k=10)
+
+        elif mode == "hybrid":
+            hybrid = HybridRetriever(vector_store, bm25_retriever, alpha=0.6)
+            docs = await asyncio.to_thread(hybrid.retrieve, query_emb, query, top_k=10)
+
+
+        # Metadata filter
+        if filter_source:
+            mf = MetadataFilter(metadata_store)
+            docs = mf.filter(docs, {"source": filter_source})
+
+        if not docs:
+            return {"answer": "No documents match the metadata filter."}
+
+
+        # Reranking
+        if docs and rerank:
+            reranked = await asyncio.to_thread(reranker.rerank, query, docs, top_k=5)
+            ranked_docs = [x[0] for x in reranked]
+
+        else:
+            ranked_docs = docs[:5]
+
+# 3a. System instruction as a model message (old SDK does NOT support system_instruction param)
+    system_instruction_text = (
+    "You are an intelligent assistant. You must stick to the user's instructions and maintain continuity. "
+    "Use the provided Long-Term Memory (Knowledge Base) to ground your answers, and the Short-Term Memory "
+    "to maintain conversational context. Only respond with factual information based on the provided context."
+        )
+
+# 3b. Memory context
+    memory_context = "\n".join([f"{m['role']}: {m['content']}" 
+                            for m in memory_manager.get_short_term_memory(session_id)])
+    context = "\n\n".join(ranked_docs)
+
+# 3c. Correct content structure for OLD Gemini SDK
+    contents_payload = [
+        {
+            "role": "model",
+            "parts": [
+                {"text": system_instruction_text}
+            ]
+        },
+        {
+            "role": "user",
+            "parts": [
+                {"text": f"Short-Term Memory:\n{memory_context}"},
+                {"text": f"Long-Term Memory (Knowledge Base):\n{context}"},
+                {"text": f"User Query:\n{query}"}
+        ]
+    }
+]
+
+# 4. Gemini call
+    answer = "An unknown error occurred."
+
+    try:
+        completion = await asyncio.to_thread(
+            gemini_client.models.generate_content,
+            model="gemini-2.5-flash",
+            contents=contents_payload,
+            config={"temperature": 0.3},
+    )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print("Gemini Error:", e)
+        answer = f"Error processing request: {e}"
+       
+
+    answer = completion.text.strip()
+
+    
+
+
+    # short term memory
+    short_memory = memory_manager.get_short_term_memory(session_id)
+#     memory_context = "\n".join([f"{m['role']}: {m['content']}" for m in short_memory])   
+
+#     # final prompt
+#     context = "\n\n".join(ranked_docs)
+#     prompt = f"""
+# You are an intelligent assistant. You must stick to the user's instructions and maintain continuity.
+
+# Short-Term Memory:
+# {memory_context}
+
+# Long-Term Memory (Knowledge Base):
+# {context}
+
+# User Query:
+# {query}
+
+# Your Response:
+#     """
+
+#     # --- CORRECTED GEMINI API CALL ---
+#     completion = await asyncio.to_thread(gemini_client.models.generate_content,
+#         model="gemini-2.5-flash",
+#         contents=prompt, 
+#         config={"temperature": 0.3}
+#     )
+
+#     answer = completion.text.strip()
+
+    memory_manager.add_message(session_id, "assistant", answer)
+
+    return {
+        "session_id": session_id,
+        "query": query,
+        "answer": answer,
+        "short_term_memory": short_memory,
+        "long_term_docs_used": ranked_docs[:3],
+        "mode": mode
+    }                        
+
 
